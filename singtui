@@ -43,38 +43,54 @@ SELECTED_RULESETS=()
 
 # --- Вспомогательные функции ---
 
-# Проверка зависимостей (оставлена без изменений)
-check_dependencies() {
-    dialog --title "Проверка зависимостей" --infobox "Проверяем наличие jq, dialog, curl и создаем директории..." 5 70
-    sleep 2
 
+## ФУНКЦИЯ ПРОВЕРКИ И УСТАНОВКИ ЗАВИСИМОСТЕЙ
+check_dependencies() {
+    # ВНИМАНИЕ: Здесь НЕ ИСПОЛЬЗУЕМ 'dialog', чтобы не вызвать ошибку,
+    # если пакет ещё не установлен. Используем 'echo' и 'sleep'.
+    
+    echo "--- Проверка зависимостей и установка ---"
+    
+    # Пакеты для проверки и установки
+    local REQUIRED_PKGS=("jq" "dialog" "curl" "sing-box-go")
     local missing_pkgs=""
-    for pkg in "jq" "dialog" "curl"; do
+
+    # 1. Проверяем наличие всех пакетов
+    for pkg in "${REQUIRED_PKGS[@]}"; do
         if ! opkg list-installed | grep -q "^$pkg "; then
             missing_pkgs="$missing_pkgs $pkg"
         fi
     done
 
     if [ -n "$missing_pkgs" ]; then
-        dialog --title "Установка зависимостей" --yesno "Отсутствуют пакеты: $missing_pkgs\n\nХотите установить их сейчас?" 8 70
-        if [ $? -eq 0 ]; then
-            opkg update
-            for pkg in $missing_pkgs; do
-                opkg install $pkg
-                if [ $? -ne 0 ]; then
-                    dialog --title "Ошибка" --msgbox "Не удалось установить $pkg. Выход." 7 60
-                    exit 1
-                fi
-            done
-        else
-            dialog --title "Отмена" --msgbox "Скрипт не может продолжаться без зависимостей. Выход." 5 50
+        echo "Отсутствуют пакеты: $missing_pkgs"
+        echo "Требуется установка. Обновляем список пакетов (opkg update)..."
+        
+        # Запрос подтверждения через echo (более простой способ, так как dialog недоступен)
+        read -r -p "Хотите установить их сейчас? (y/n): " confirm
+        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+            echo "Установка отменена. Выход."
             exit 1
         fi
+
+        opkg update
+        
+        # Установка недостающих пакетов
+        for pkg in $missing_pkgs; do
+            echo "Устанавливаем $pkg..."
+            opkg install "$pkg"
+            if [ $? -ne 0 ]; then
+                echo "Ошибка: Не удалось установить $pkg. Проверьте подключение и репозитории."
+                exit 1
+            fi
+        done
     fi
     
     mkdir -p "$SINGBOX_DIR"
-    dialog --title "Успех" --infobox "Зависимости и директории готовы." 3 50
+    echo "Все зависимости готовы."
     sleep 1
+    
+    # Теперь 'dialog' гарантированно установлен, и мы можем перейти к TUI-меню.
 }
 
 # Функция парсинга VLESS URI (оставлена без изменений)
