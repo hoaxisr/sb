@@ -338,10 +338,6 @@ generate_config() {
             "type": "block",
             "tag": "block"
         },
-        {
-            "type": "dns",
-            "tag": "dns-out"
-        },
         ${VLESS_OUTBOUND},
     ],
     "route": {
@@ -349,11 +345,7 @@ generate_config() {
             ${RULE_SET_JSON}
         ],
         "rules": [
-            {
-                "protocol": "dns",
-                "outbound": "dns-out"
-            }
-            ${RULES_JSON}
+          ${RULES_JSON}
         ],
         "final": "direct"
     }
