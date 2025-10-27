@@ -226,14 +226,11 @@ generate_config() {
         ],
         "outbounds": [
             {"type": "direct", "tag": "direct"},
-            {"type": "block", "tag": "block"},
-            {"type": "dns", "tag": "dns-out"}
+            {"type": "block", "tag": "block"}
         ],
         "route": {
             "rule_set": [],
             "rules": [
-                # Обязательное правило DNS-протокола
-                {"protocol": "dns", "outbound": "dns-out"}
             ],
             # Все, что не попало в Rulesets, направляется в Direct (по требованию пользователя)
             "final": "direct" 
