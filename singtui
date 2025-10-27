@@ -1,0 +1,400 @@
+#!/bin/bash
+# ==============================================================================
+# TUI-конфигуратор Sing-Box для Entware Keenetic
+# (Сценарий: mixed:2080, VLESS out, Динамические Rulesets с GitHub, Final Direct)
+# ==============================================================================
+
+# --- Настройки среды ---
+SINGBOX_DIR="/opt/etc/sing-box"
+CONFIG_PATH="$SINGBOX_DIR/config.json"
+TMP_CONFIG="/tmp/sing-box-config.tmp"
+RULESET_BASE_URL="https://raw.githubusercontent.com/vernette/rulesets/master/srs"
+
+# --- Глобальные переменные для хранения настроек ---
+VLESS_LINK=""
+VLESS_TAG="proxy" # Тег исходящего потока
+V_UUID=""
+V_SERVER=""
+V_PORT=""
+V_FLOW="xtls-rprx-vision" 
+V_SECURITY="tls" 
+V_TRANSPORT_TYPE="tcp"
+V_TRANSPORT_PATH=""
+V_TRANSPORT_HEADER_HOST=""
+
+# Полный список доступных правил vernette
+declare -A ALL_RULESETS=(
+    ["copilot"]="GitHub Copilot"
+    ["discord-full"]="Discord (Полный набор)"
+    ["grok"]="Grok AI"
+    ["instagram"]="Instagram"
+    ["linkedn"]="LinkedIn"
+    ["netflix"]="Netflix"
+    ["openai"]="OpenAI (ChatGPT, API)"
+    ["rkn"]="Сайты, заблокированные РКН"
+    ["telegram-voice-chats"]="Голосовые чаты Telegram"
+    ["tiktok"]="TikTok"
+    ["unavailable-in-russia"]="Недоступные в РФ сервисы"
+    ["x"]="X (Twitter)"
+    ["youtube"]="YouTube"
+)
+# Выбранные пользователем правила (по умолчанию пустой массив)
+SELECTED_RULESETS=()
+
+# --- Вспомогательные функции ---
+
+# Проверка зависимостей (оставлена без изменений)
+check_dependencies() {
+    dialog --title "Проверка зависимостей" --infobox "Проверяем наличие jq, dialog, curl и создаем директории..." 5 70
+    sleep 2
+
+    local missing_pkgs=""
+    for pkg in "jq" "dialog" "curl"; do
+        if ! opkg list-installed | grep -q "^$pkg "; then
+            missing_pkgs="$missing_pkgs $pkg"
+        fi
+    done
+
+    if [ -n "$missing_pkgs" ]; then
+        dialog --title "Установка зависимостей" --yesno "Отсутствуют пакеты: $missing_pkgs\n\nХотите установить их сейчас?" 8 70
+        if [ $? -eq 0 ]; then
+            opkg update
+            for pkg in $missing_pkgs; do
+                opkg install $pkg
+                if [ $? -ne 0 ]; then
+                    dialog --title "Ошибка" --msgbox "Не удалось установить $pkg. Выход." 7 60
+                    exit 1
+                fi
+            done
+        else
+            dialog --title "Отмена" --msgbox "Скрипт не может продолжаться без зависимостей. Выход." 5 50
+            exit 1
+        fi
+    fi
+    
+    mkdir -p "$SINGBOX_DIR"
+    dialog --title "Успех" --infobox "Зависимости и директории готовы." 3 50
+    sleep 1
+}
+
+# Функция парсинга VLESS URI (оставлена без изменений)
+parse_vless_link() {
+    # Сброс и парсинг логика... (вставь логику из предыдущего ответа)
+    V_UUID="" && V_SERVER="" && V_PORT="" && V_FLOW="" && V_SECURITY="tls" && V_TRANSPORT_TYPE="tcp" && V_TRANSPORT_PATH="" && V_TRANSPORT_HEADER_HOST=""
+
+    local link_data=$1
+    local content
+    content=$(echo "$link_data" | sed 's/^vless:\/\///')
+    
+    V_UUID=$(echo "$content" | cut -d '@' -f 1)
+    if [ -z "$V_UUID" ]; then return 1; fi
+
+    local addr_params
+    addr_params=$(echo "$content" | cut -d '@' -f 2)
+
+    V_SERVER=$(echo "$addr_params" | cut -d ':' -f 1)
+    
+    local port_params
+    port_params=$(echo "$addr_params" | cut -d ':' -f 2)
+    
+    V_PORT=$(echo "$port_params" | cut -d '?' -f 1)
+    
+    local params
+    params=$(echo "$port_params" | cut -d '?' -f 2)
+    
+    IFS='&' read -ra pairs <<< "$params"
+    for pair in "${pairs[@]}"; do
+        local key
+        key=$(echo "$pair" | cut -d '=' -f 1)
+        local value
+        value=$(echo "$pair" | cut -d '=' -f 2)
+        
+        value=$(echo "$value" | sed 's/+/ /g; s/%/\\x/g' | xargs -0 printf %b)
+
+        case "$key" in
+            security) V_SECURITY="$value" ;;
+            flow) V_FLOW="$value" ;;
+            type) V_TRANSPORT_TYPE="$value" ;;
+            host) V_TRANSPORT_HEADER_HOST="$value" ;;
+            path) V_TRANSPORT_PATH="$value" ;;
+            sni) : ;; 
+            alpn) : ;;
+            pbk) : ;;
+            sid) : ;;
+            name) : ;;
+            *) : ;;
+        esac
+    done
+    
+    if [ -z "$V_UUID" ] || [ -z "$V_SERVER" ] || [ -z "$V_PORT" ]; then
+        return 1
+    fi
+    
+    if [ "$V_TRANSPORT_TYPE" = "v2ray-ws" ]; then V_TRANSPORT_TYPE="ws"; fi
+    if [ "$V_TRANSPORT_TYPE" = "v2ray-grpc" ]; then V_TRANSPORT_TYPE="grpc"; fi
+    
+    return 0
+}
+
+
+# --- Функции TUI ---
+
+# Настройка исходящего сервера VLESS (оставлена без изменений)
+configure_outbound_vless() {
+    while true; do
+        VLESS_LINK=$(dialog --clear --backtitle "Конфигуратор Sing-Box" \
+            --title "Настройка VLESS Outbound" \
+            --inputbox "Вставьте полную ссылку VLESS (vless://...):\n\nТекущая ссылка:\n$VLESS_LINK" 12 80 "$VLESS_LINK" 2>&1 >/dev/tty)
+        
+        if [ $? -ne 0 ]; then return 1; fi
+        
+        if parse_vless_link "$VLESS_LINK"; then
+            dialog --title "Успех" --msgbox "VLESS-ссылка успешно разобрана:\n\nСервер: $V_SERVER:$V_PORT\nБезопасность: $V_SECURITY\nТранспорт: $V_TRANSPORT_TYPE" 10 70
+            return 0
+        else
+            dialog --title "Ошибка Парсинга" --msgbox "Не удалось разобрать ссылку. Проверьте формат VLESS URI." 7 70
+        fi
+    done
+}
+
+# Выбор правил маршрутизации
+select_rulesets_tui() {
+    local checklist_options=()
+    
+    # Создаем ассоциативный массив для текущего состояния
+    declare -A rule_states
+    for rule in "${SELECTED_RULESETS[@]}"; do
+        rule_states[$rule]="on"
+    done
+
+    # Формируем список для dialog (RuleName Desc State)
+    for rule_name in "${!ALL_RULESETS[@]}"; do
+        local state="off"
+        if [ "${rule_states[$rule_name]}" = "on" ]; then
+            state="on"
+        fi
+        checklist_options+=("$rule_name" "${ALL_RULESETS[$rule_name]}" "$state")
+    done
+
+    local choices
+    choices=$(dialog --clear --backtitle "Конфигуратор Sing-Box" \
+        --title "Выбор правил маршрутизации (vernette/rulesets)" \
+        --checklist "Выберите правила. Весь трафик, соответствующий им, пойдет в PROXY." 20 65 14 \
+        "${checklist_options[@]}" \
+        2>&1 >/dev/tty)
+
+    if [ $? -ne 0 ]; then return; fi # Нажата "Отмена"
+
+    # Обновляем список выбранных правил
+    local choices_cleaned
+    choices_cleaned=$(echo "$choices" | sed 's/"//g')
+    IFS=' ' read -r -a SELECTED_RULESETS <<< "$choices_cleaned"
+    
+    dialog --title "Успех" --infobox "Выбрано правил: ${#SELECTED_RULESETS[@]}" 3 50
+    sleep 1
+}
+
+# --- Основная логика ---
+
+# Генерация JSON-конфига и сохранение
+generate_config() {
+    if [ -z "$V_SERVER" ]; then
+        dialog --title "Ошибка" --msgbox "Сначала необходимо настроить VLESS Outbound (Пункт 1)." 5 60
+        return 1
+    fi
+    
+    dialog --title "Генерация" --infobox "Генерируем config.json..." 3 50
+    
+    # 1. Создаем базовую структуру JSON
+    # DNS-правила удалены, чтобы не усложнять. Используем только основной DNS-сервер и правило для dns-out.
+    local base_config
+    base_config=$(jq -n '{
+        "log": {"level": "info", "timestamp": true},
+        "dns": {
+            "servers": [
+                {"address": "8.8.8.8", "tag": "DNS-proxy", "detour": "proxy"}
+            ],
+            "strategy": "ipv4_only"
+        },
+        "inbounds": [
+            {
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "0.0.0.0",
+                "listen_port": 2080
+            }
+        ],
+        "outbounds": [
+            {"type": "direct", "tag": "direct"},
+            {"type": "block", "tag": "block"},
+            {"type": "dns", "tag": "dns-out"}
+        ],
+        "route": {
+            "rule_set": [],
+            "rules": [
+                # Обязательное правило DNS-протокола
+                {"protocol": "dns", "outbound": "dns-out"}
+            ],
+            # Все, что не попало в Rulesets, направляется в Direct (по требованию пользователя)
+            "final": "direct" 
+        }
+    }')
+    
+    # 2. Формируем секцию Rule_Set и Rules
+    local ruleset_array='[]'
+    local rules_array='[]'
+
+    for rule_name in "${SELECTED_RULESETS[@]}"; do
+        local rule_url="$RULESET_BASE_URL/$rule_name.srs"
+        
+        # Добавляем в rule_set
+        ruleset_array=$(echo "$ruleset_array" | jq \
+            --arg tag "$rule_name" \
+            --arg url "$rule_url" \
+            '. += [{
+                "tag": $tag,
+                "type": "remote",
+                "format": "binary",
+                "url": $url
+            }]')
+            
+        # Добавляем в rules (маршрутизация в proxy)
+        rules_array=$(echo "$rules_array" | jq \
+            --arg tag "$rule_name" \
+            '. += [{
+                "rule_set": $tag, 
+                "outbound": "proxy"
+            }]')
+    done
+    
+    # Объединяем Rule_Set и Rules с базовой конфигурацией
+    base_config=$(echo "$base_config" | jq \
+        --argjson ruleset "$ruleset_array" \
+        --argjson rules "$rules_array" \
+        '.route.rule_set += $ruleset | .route.rules += $rules')
+
+
+    # 3. Формируем исходящий поток VLESS (логика из предыдущего ответа)
+    
+    local tls_config='{"enabled": true, "insecure": false, "server_name": "'"$V_SERVER"'"}'
+    local transport_config='{}'
+    
+    if [ "$V_SECURITY" = "reality" ]; then
+        local V_PBK=$(echo "$VLESS_LINK" | grep -oP 'pbk=\K[^&]+')
+        local V_SID=$(echo "$VLESS_LINK" | grep -oP 'sid=\K[^&]+')
+        local V_SPN=$(echo "$VLESS_LINK" | grep -oP 'sni=\K[^&]+')
+        
+        tls_config=$(jq -n \
+            --arg pbk "$V_PBK" \
+            --arg sid "$V_SID" \
+            --arg spn "$V_SPN" \
+            '{
+                "enabled": true,
+                "insecure": true,
+                "server_name": $spn,
+                "reality": {
+                    "enabled": true,
+                    "public_key": $pbk,
+                    "short_id": $sid
+                }
+            }')
+            
+        V_FLOW="xtls-rprx-vision"
+        V_TRANSPORT_TYPE="tcp"
+        
+    elif [ "$V_TRANSPORT_TYPE" != "tcp" ]; then
+        local transport_json
+        transport_json='{"type": "'"$V_TRANSPORT_TYPE"'"}'
+        
+        if [ -n "$V_TRANSPORT_PATH" ]; then
+            transport_json=$(echo "$transport_json" | jq --arg path "$V_TRANSPORT_PATH" '.ws.path = $path')
+        fi
+        if [ -n "$V_TRANSPORT_HEADER_HOST" ]; then
+            transport_json=$(echo "$transport_json" | jq --arg host "$V_TRANSPORT_HEADER_HOST" '.ws.headers.Host = $host')
+            transport_json=$(echo "$transport_json" | jq --arg host "$V_TRANSPORT_HEADER_HOST" '.grpc.service_name = $host')
+        fi
+        transport_config="$transport_json"
+    fi
+
+    local vless_outbound
+    vless_outbound=$(jq -n \
+        --arg tag "$VLESS_TAG" \
+        --arg server "$V_SERVER" \
+        --arg port "$V_PORT" \
+        --arg uuid "$V_UUID" \
+        --arg flow "$V_FLOW" \
+        --arg transport_type "$V_TRANSPORT_TYPE" \
+        --argjson tls_conf "$tls_config" \
+        --argjson transport_conf "$transport_config" \
+        '{
+            "type": "vless",
+            "tag": $tag,
+            "server": $server,
+            "server_port": ($port | tonumber),
+            "uuid": $uuid,
+            "flow": $flow,
+            "tls": $tls_conf,
+            "transport": $transport_conf
+        }')
+    
+    # 4. Вставляем VLESS Outbound в общий конфиг
+    base_config=$(echo "$base_config" | jq --argjson vless "$vless_outbound" '.outbounds += [$vless]')
+
+    # 5. Проверяем JSON на валидность и сохраняем
+    echo "$base_config" | jq . > "$TMP_CONFIG"
+    
+    if [ $? -ne 0 ]; then
+        dialog --title "Ошибка" --msgbox "Ошибка генерации JSON. Конфиг НЕ сохранен. Проверьте параметры VLESS." 7 70
+        return 1
+    fi
+    
+    # Сохраняем
+    mv "$TMP_CONFIG" "$CONFIG_PATH"
+    
+    dialog --title "Сохранение" --yesno "Конфиг успешно сгенерирован и сохранен в $CONFIG_PATH.\n\nПорт SOCKS/HTTP: 2080.\n\nПерезапустить sing-box сейчас?" 9 70
+    
+    if [ $? -eq 0 ]; then
+        if [ -f /opt/etc/init.d/S99sing-box ]; then
+            /opt/etc/init.d/S99sing-box restart
+            dialog --title "Перезапуск" --infobox "Sing-box перезапущен." 3 50
+            sleep 1
+        else
+            dialog --title "Предупреждение" --msgbox "Не найден скрипт запуска /opt/etc/init.d/S99sing-box. Запустите вручную." 7 60
+        fi
+    fi
+    return 0
+}
+
+# Главное меню TUI
+main_menu() {
+    local choice
+    while true; do
+        local status_vless="❌ Не настроен"
+        if [ -n "$V_SERVER" ]; then
+            status_vless="✅ $V_SERVER:$V_PORT ($V_SECURITY/$V_TRANSPORT_TYPE)"
+        fi
+        
+        local status_rulesets="${#SELECTED_RULESETS[@]} правил"
+
+        choice=$(dialog --clear --backtitle "Конфигуратор Sing-Box (Keenetic Entware)" \
+            --title "Главное Меню" \
+            --menu "Выберите раздел для настройки:\n\nСтатус:\nVLESS: $status_vless\nRulesets: $status_rulesets (маршрутируются в PROXY)" 18 80 5 \
+            "1" "Настройка VLESS Outbound (обязательно)" \
+            "2" "Выбор правил маршрутизации (Rulesets)" \
+            "3" "Сгенерировать config.json и Перезапустить" \
+            "0" "Выход" \
+            2>&1 >/dev/tty)
+
+        case $choice in
+            1) configure_outbound_vless ;;
+            2) select_rulesets_tui ;;
+            3) generate_config ;;
+            0) clear; exit 0 ;;
+            *) ;;
+        esac
+    done
+}
+
+# --- Точка входа ---
+check_dependencies
+main_menu
